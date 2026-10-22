@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weather App (React)</title>
+  <link rel="stylesheet" href="style.css" />
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // Get a free key at https://home.openweathermap.org/api_keys
+    const API_KEY = "cc43ba69009c31161202dfcc15594f47";
+    const BASE = "https://api.openweathermap.org/data/2.5";
+
+    async function getJSON(url) {
+      const res = await fetch(url);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || "Something went wrong");
+      return data;
+    }
+
+    // Pick the forecast entry closest to noon for each day (API gives 3-hour steps)
+    function dailyForecast(list) {
+      const byDay = {};
+      list.forEach((item) => {
+        const [date, time] = item.dt_txt.split(" ");
+        const diff = Math.abs(Number(time.slice(0, 2)) - 12);
+        if (!byDay[date] || diff < byDay[date].diff) byDay[date] = { item, diff };
+      });
+      return Object.values(byDay).slice(0, 5).map((d) => d.item);
+    }
+
+    function SearchBar({ onSearch, onLocate }) {
+      const [value, setValue] = useState("");
+      const submit = (e) => {
+        e.preventDefault();
+        if (value.trim()) onSearch(value.trim());
+      };
+      return (
+        <form className="search" onSubmit={submit}>
+          <input
+            type="text"
+            placeholder="Search city..."
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+          />
+          <button type="submit">Search</button>
+          <button type="button" onClick={onLocate} title="Use my location">📍</button>
+        </form>
+      );
+    }
+
+    function CurrentWeather({ data, units }) {
+      const sym = units === "metric" ? "°C" : "°F";
+      const windUnit = units === "metric" ? "m/s" : "mph";
+      return (
+        <section className="card">
+          <div className="current-top">
+            <div>
+              <h2>{data.name}, {data.sys.country}</h2>
+              <p className="muted">{data.weather[0].description}</p>
+            </div>
+            <img
+              src={`https://openweathermap.org/img/wn/${data.weather[0].icon}@2x.png`}
+              alt={data.weather[0].description}
+            />
+          </div>
+          <div className="temp">{Math.round(data.main.temp)}{sym}</div>
+          <div className="details">
+            <div><span className="muted">Feels like</span><strong>{Math.round(data.main.feels_like)}{sym}</strong></div>
+            <div><span className="muted">Humidity</span><strong>{data.main.humidity}%</strong></div>
+            <div><span className="muted">Wind</span><strong>{data.wind.speed} {windUnit}</strong></div>
+            <div><span className="muted">Pressure</span><strong>{data.main.pressure} hPa</strong></div>
+          </div>
+        </section>
+      );
+    }
+
+    function Forecast({ list, units }) {
+      const sym = units === "metric" ? "°C" : "°F";
+      return (
+        <section>
+          <h3>5-day forecast</h3>
+          <div className="forecast">
+            {dailyForecast(list).map((item) => (
+              <div className="day" key={item.dt}>
+                <div className="d">
+                  {new Date(item.dt * 1000).toLocaleDateString(undefined, { weekday: "short" })}
+                </div>
+                <img
+                  src={`https://openweathermap.org/img/wn/${item.weather[0].icon}.png`}
+                  alt={item.weather[0].description}
+                />
+                <div className="t">{Math.round(item.main.temp)}{sym}</div>
+              </div>
+            ))}
+          </div>
+        </section>
+      );
+    }
+
+    function App() {
+      const [query, setQuery] = useState({ type: "city", city: "Raipur" });
+      const [units, setUnits] = useState("metric");
+      const [current, setCurrent] = useState(null);
+      const [forecast, setForecast] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      // Refetch whenever the query or the unit changes
+      useEffect(() => {
+        if (API_KEY === "YOUR_API_KEY_HERE") {
+          setError("Add your OpenWeather API key in index.html first.");
+          return;
+        }
+        let cancelled = false;
+        const params =
+          query.type === "city"
+            ? `q=${encodeURIComponent(query.city)}`
+            : `lat=${query.lat}&lon=${query.lon}`;
+        const common = `&units=${units}&appid=${API_KEY}`;
+
+        setLoading(true);
+        setError("");
+        Promise.all([
+          getJSON(`${BASE}/weather?${params}${common}`),
+          getJSON(`${BASE}/forecast?${params}${common}`),
+        ])
+          .then(([c, f]) => {
+            if (cancelled) return;
+            setCurrent(c);
+            setForecast(f.list);
+          })
+          .catch((err) => {
+            if (cancelled) return;
+            setCurrent(null);
+            setForecast(null);
+            setError(err.message);
+          })
+          .finally(() => !cancelled && setLoading(false));
+
+        return () => { cancelled = true; };
+      }, [query, units]);
+
+      const locate = useCallback(() => {
+        if (!navigator.geolocation) return setError("Geolocation is not supported.");
+        navigator.geolocation.getCurrentPosition(
+          (pos) => setQuery({ type: "coords", lat: pos.coords.latitude, lon: pos.coords.longitude }),
+          () => setError("Location access denied.")
+        );
+      }, []);
+
+      return (
+        <main className="app">
+          <h1>Weather</h1>
+          <SearchBar onSearch={(city) => setQuery({ type: "city", city })} onLocate={locate} />
+          <div className="unit-toggle">
+            <button type="button" onClick={() => setUnits(units === "metric" ? "imperial" : "metric")}>
+              Switch to {units === "metric" ? "°F" : "°C"}
+            </button>
+          </div>
+
+          {loading && <p className="status">Loading...</p>}
+          {error && <p className="status error">Error: {error}</p>}
+          {current && <CurrentWeather data={current} units={units} />}
+          {forecast && <Forecast list={forecast} units={units} />}
+        </main>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
