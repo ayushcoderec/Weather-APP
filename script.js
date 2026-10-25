@@ -1,120 +1,204 @@
-// 1. Get a free key at https://home.openweathermap.org/api_keys and paste it here.
+// Optional: paste your OpenWeather key here. If you leave it empty, the app asks for it on first load
+// and remembers it in this browser. Get a free key at https://home.openweathermap.org/api_keys
 const API_KEY = "cc43ba69009c31161202dfcc15594f47";
-const BASE = "https://api.openweathermap.org/data/2.5";
 
-let units = "metric"; // "metric" = °C, "imperial" = °F
-let lastQuery = null; // remembers the last search so the unit toggle can refetch
+const { esc, iconUrl, pct, compass, store, fmtHour, fmtClock, fetchWeather, friendlyError,
+        skyFor, precipFor, rainOutlook, dailySummary, range24, curve, createFX } = WeatherCore;
 
 const $ = (id) => document.getElementById(id);
-const form = $("search-form");
-const cityInput = $("city-input");
-const statusEl = $("status");
+const fx = createFX($("fx"));
 
-function showStatus(msg, isError = false) {
-  statusEl.textContent = msg;
-  statusEl.className = "status" + (isError ? " error" : "");
-  statusEl.hidden = false;
+const state = {
+  units: store.get("units") === "imperial" ? "imperial" : "metric",
+  query: (() => {
+    try { return JSON.parse(store.get("query")) || { type: "city", city: "Raipur" }; }
+    catch (e) { return { type: "city", city: "Raipur" }; }
+  })(),
+};
+let requestId = 0;
+
+const getKey = () => API_KEY || store.get("owm_key") || "";
+
+/* ---------- UI state helpers ---------- */
+function showNotice(msg, isError = false) {
+  const el = $("notice");
+  el.textContent = msg;
+  el.className = "notice" + (isError ? " is-error" : "");
+  el.hidden = false;
 }
-const hideStatus = () => (statusEl.hidden = true);
+const hideNotice = () => ($("notice").hidden = true);
 
-async function getJSON(url) {
-  const res = await fetch(url);
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.message || "Something went wrong");
-  }
-  return data;
+function showSetup() {
+  $("dash").hidden = true;
+  $("setup").hidden = false;
+  fx.set("none", 0);
 }
 
-function buildUrls(query) {
-  const base = query.type === "city" ? `q=${encodeURIComponent(query.city)}` : `lat=${query.lat}&lon=${query.lon}`;
-  const common = `&units=${units}&appid=${API_KEY}`;
-  return {
-    current: `${BASE}/weather?${base}${common}`,
-    forecast: `${BASE}/forecast?${base}${common}`,
-  };
+function syncUnitButtons() {
+  document.querySelectorAll(".seg button").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.unit === state.units))
+  );
 }
 
-async function loadWeather(query) {
-  if (API_KEY === "YOUR_API_KEY_HERE") {
-    showStatus("Add your OpenWeather API key in script.js first.", true);
-    return;
-  }
-  lastQuery = query;
-  showStatus("Loading...");
+/* ---------- loading ---------- */
+async function load() {
+  const key = getKey();
+  if (!key) return showSetup();
+
+  const mine = ++requestId;
+  $("setup").hidden = true;
+  hideNotice();
+  $("dash").setAttribute("aria-busy", "true");
+
   try {
-    const urls = buildUrls(query);
-    const [current, forecast] = await Promise.all([getJSON(urls.current), getJSON(urls.forecast)]);
-    renderCurrent(current);
-    renderForecast(forecast);
-    hideStatus();
+    const data = await fetchWeather(state.query, state.units, key);
+    if (mine !== requestId) return; // a newer search replaced this one
+    render(data);
+    store.set("query", JSON.stringify(state.query));
   } catch (err) {
-    $("current").hidden = true;
-    $("forecast-wrap").hidden = true;
-    showStatus(`Error: ${err.message}`, true);
+    if (mine !== requestId) return;
+    showNotice(friendlyError(err), true);
+    if (err.status === 401) showSetup();
+  } finally {
+    if (mine === requestId) $("dash").setAttribute("aria-busy", "false");
   }
 }
 
-function renderCurrent(d) {
-  const unitSymbol = units === "metric" ? "°C" : "°F";
-  const windUnit = units === "metric" ? "m/s" : "mph";
-  $("city-name").textContent = `${d.name}, ${d.sys.country}`;
-  $("description").textContent = d.weather[0].description;
-  $("icon").src = `https://openweathermap.org/img/wn/${d.weather[0].icon}@2x.png`;
-  $("temp").textContent = `${Math.round(d.main.temp)}${unitSymbol}`;
-  $("feels").textContent = `${Math.round(d.main.feels_like)}${unitSymbol}`;
-  $("humidity").textContent = `${d.main.humidity}%`;
-  $("wind").textContent = `${d.wind.speed} ${windUnit}`;
-  $("pressure").textContent = `${d.main.pressure} hPa`;
-  $("current").hidden = false;
+/* ---------- rendering ---------- */
+function render({ current, forecast }) {
+  const tz = current.timezone;
+  const w = current.weather[0];
+  const metric = state.units === "metric";
+
+  document.body.dataset.sky = skyFor(w);
+  const p = precipFor(w);
+  fx.set(p.mode, p.intensity);
+
+  const place = current.sys && current.sys.country ? `${current.name}, ${current.sys.country}` : current.name;
+  $("city-name").textContent = place;
+  $("local-time").textContent = fmtClock(current.dt, tz);
+  $("temp").textContent = `${Math.round(current.main.temp)}°`;
+  $("icon").src = iconUrl(w.icon, "@4x");
+  $("description").textContent = w.description;
+  document.title = `${Math.round(current.main.temp)}° in ${current.name}`;
+
+  const days = dailySummary(forecast.list, tz, current.dt);
+  const { hi, lo } = range24(current, forecast.list);
+  $("hilo").textContent = `High ${Math.round(hi)}°, low ${Math.round(lo)}° over the next 24 hours`;
+
+  const wind = metric ? current.wind.speed * 3.6 : current.wind.speed;
+  const dir = current.wind.deg != null ? ` ${compass(current.wind.deg)}` : "";
+  $("feels").textContent = `${Math.round(current.main.feels_like)}°`;
+  $("humidity").textContent = `${current.main.humidity}%`;
+  $("wind").textContent = `${Math.round(wind)} ${metric ? "km/h" : "mph"}${dir}`;
+  $("pressure").textContent = `${current.main.pressure} hPa`;
+  $("visibility").textContent = current.visibility != null ? `${+(current.visibility / 1000).toFixed(1)} km` : "n/a";
+  $("clouds").textContent = `${current.clouds ? current.clouds.all : 0}%`;
+
+  renderRain(rainOutlook(current, forecast.list, tz), tz);
+  renderDays(days);
+  $("dash").hidden = false;
 }
 
-function renderForecast(data) {
-  const unitSymbol = units === "metric" ? "°C" : "°F";
-  // The API returns 3-hour steps; group by day and take the entry closest to noon.
-  const byDay = {};
-  data.list.forEach((item) => {
-    const date = item.dt_txt.split(" ")[0];
-    const hour = Number(item.dt_txt.split(" ")[1].slice(0, 2));
-    const diff = Math.abs(hour - 12);
-    if (!byDay[date] || diff < byDay[date].diff) byDay[date] = { item, diff };
-  });
+function renderRain(outlook, tz) {
+  const { slots } = outlook;
+  const c = curve(slots.map((s) => s.pop));
 
-  const days = Object.values(byDay).slice(0, 5);
-  $("forecast").innerHTML = days
-    .map(({ item }) => {
-      const name = new Date(item.dt * 1000).toLocaleDateString(undefined, { weekday: "short" });
-      return `
-        <div class="day">
-          <div class="d">${name}</div>
-          <img src="https://openweathermap.org/img/wn/${item.weather[0].icon}.png" alt="${item.weather[0].description}" />
-          <div class="t">${Math.round(item.main.temp)}${unitSymbol}</div>
-        </div>`;
+  $("rain-headline").textContent = outlook.headline;
+  $("rain-detail").textContent = outlook.detail;
+  $("chart").setAttribute("aria-label", `${outlook.headline}. ${outlook.detail}`);
+
+  const pops = slots
+    .map((s, i) => {
+      const cls = i === outlook.peakIndex ? " is-peak" : s.pop < 0.05 ? " zero" : "";
+      return `<span class="pop${cls}">${pct(s.pop)}%</span>`;
     })
     .join("");
-  $("forecast-wrap").hidden = false;
+
+  const cols = slots
+    .map(
+      (s) => `
+      <div class="slot">
+        <span class="t">${esc(fmtHour(s.dt, tz))}</span>
+        <img src="${iconUrl(s.icon)}" alt="" width="36" height="36" />
+        <span class="c">${Math.round(s.temp)}°</span>
+        <span class="mm">${s.mm >= 0.1 ? s.mm.toFixed(1) + " mm" : ""}</span>
+      </div>`
+    )
+    .join("");
+
+  $("chart").innerHTML = `
+    <div class="chart-inner">
+      <div class="pops">${pops}</div>
+      <svg class="curve" viewBox="0 0 ${c.W} 100" preserveAspectRatio="none" aria-hidden="true">
+        <defs>
+          <linearGradient id="rainFill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#8fdcff" stop-opacity="0.55" />
+            <stop offset="1" stop-color="#8fdcff" stop-opacity="0" />
+          </linearGradient>
+        </defs>
+        <path class="area" d="${c.area}" />
+        <path class="line" d="${c.line}" />
+      </svg>
+      <div class="slots">${cols}</div>
+    </div>`;
 }
 
-form.addEventListener("submit", (e) => {
+function renderDays(days) {
+  $("days").innerHTML = days
+    .map((d) => {
+      const chance = pct(d.pop);
+      return `
+      <li>
+        <span class="dn">${esc(d.label)}</span>
+        <img src="${iconUrl(d.icon)}" alt="" width="36" height="36" />
+        <span class="chance" aria-label="${chance}% chance of rain">
+          <span class="bar"><i style="width:${chance}%"></i></span><b>${chance}%</b>
+        </span>
+        <span class="range"><span class="hi">${Math.round(d.hi)}°</span><span class="lo">${Math.round(d.lo)}°</span></span>
+      </li>`;
+    })
+    .join("");
+}
+
+/* ---------- events ---------- */
+$("search-form").addEventListener("submit", (e) => {
   e.preventDefault();
-  const city = cityInput.value.trim();
-  if (city) loadWeather({ type: "city", city });
+  const city = $("city-input").value.trim();
+  if (!city) return;
+  state.query = { type: "city", city };
+  load();
 });
 
 $("locate-btn").addEventListener("click", () => {
-  if (!navigator.geolocation) return showStatus("Geolocation is not supported by your browser.", true);
-  showStatus("Getting your location...");
+  if (!navigator.geolocation) return showNotice("This browser can't share your location. Search for a city instead.", true);
+  showNotice("Finding your location…");
   navigator.geolocation.getCurrentPosition(
-    (pos) => loadWeather({ type: "coords", lat: pos.coords.latitude, lon: pos.coords.longitude }),
-    () => showStatus("Location access denied.", true)
+    (pos) => {
+      state.query = { type: "coords", lat: pos.coords.latitude, lon: pos.coords.longitude };
+      load();
+    },
+    () => showNotice("Location access is blocked. Allow it in your browser settings, or search for a city.", true)
   );
 });
 
-$("unit-btn").addEventListener("click", () => {
-  units = units === "metric" ? "imperial" : "metric";
-  $("unit-btn").textContent = units === "metric" ? "Switch to °F" : "Switch to °C";
-  if (lastQuery) loadWeather(lastQuery);
+document.querySelectorAll(".seg button").forEach((btn) =>
+  btn.addEventListener("click", () => {
+    if (state.units === btn.dataset.unit) return;
+    state.units = btn.dataset.unit;
+    store.set("units", state.units);
+    syncUnitButtons();
+    load();
+  })
+);
+
+$("key-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const key = $("key-input").value.trim();
+  if (!key) return;
+  store.set("owm_key", key);
+  load();
 });
 
-// Default city on first load
-loadWeather({ type: "city", city: "Raipur" });
+syncUnitButtons();
+load();
